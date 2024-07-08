@@ -24,9 +24,10 @@ Value *LogErrorV(const std::string Str) {
    interferire con il builder globale, la generazione viene dunque effettuata
    con un builder temporaneo TmpB
 */
-static AllocaInst *CreateEntryBlockAlloca(Function *fun, StringRef VarName) {
+static AllocaInst *CreateEntryBlockAlloca(Function *fun, StringRef VarName,Type* T = Type::getDoubleTy(*context)) {
   IRBuilder<> TmpB(&fun->getEntryBlock(), fun->getEntryBlock().begin());
-  return TmpB.CreateAlloca(Type::getDoubleTy(*context), nullptr, VarName);
+  return TmpB.CreateAlloca(T, nullptr, VarName);
+
 }
 
 // Implementazione del costruttore della classe driver
@@ -85,7 +86,7 @@ Value *NumberExprAST::codegen(driver& drv) {
 };
 
 /******************** Variable Expression Tree ********************/
-VariableExprAST::VariableExprAST(const std::string &Name): Name(Name) {};
+VariableExprAST::VariableExprAST(const std::string &Name, ExprAST* Index, bool IsArray): Name(Name), Index(Index), IsArray(IsArray) {};
 
 lexval VariableExprAST::getLexVal() const {
   lexval lval = Name;
@@ -112,11 +113,42 @@ Value *VariableExprAST::codegen(driver& drv) {
 
     //Se non c'è nemmeno nei globali lancio errore.
     if(!G) { return LogErrorV("Variabile "+Name+" not definita"); }
-    else { return builder->CreateLoad(G->getValueType(),G,Name.c_str());}
+
+    if(IsArray) {
+      Value *VIndex = Index->codegen(drv);
+
+      if(!VIndex) {return nullptr;}
+
+      Value *FPIndex = builder->CreateFPTrunc(VIndex, Type::getFloatTy(*context));
+      Value *INTIndex = builder->CreateFPToSI(FPIndex, Type::getInt32Ty(*context));
+
+      Value *GEP = builder->CreateInBoundsGEP(G->getValueType(),G, INTIndex);
+
+      return builder->CreateLoad(Type::getDoubleTy(*context),GEP,Name.c_str());
+    }
+    else { 
+      return builder->CreateLoad(G->getValueType(),G,Name.c_str());
+    }
 
   }
-  //Prende il valore della variabile Name da NamedValues
-  else { return builder->CreateLoad(A->getAllocatedType(),A,Name.c_str());}
+
+  if(IsArray) {
+      Value *VIndex = Index->codegen(drv);
+
+      if(!VIndex) {return nullptr;}
+
+      Value *FPIndex = builder->CreateFPTrunc(VIndex, Type::getFloatTy(*context));
+      Value *INTIndex = builder->CreateFPToSI(FPIndex, Type::getInt32Ty(*context));
+
+      Value *GEP = builder->CreateInBoundsGEP(A->getAllocatedType(),A, INTIndex);
+
+      return builder->CreateLoad(Type::getDoubleTy(*context),GEP,Name.c_str());
+  }
+  else { 
+    //Prende il valore della variabile Name da NamedValues
+    return builder->CreateLoad(A->getAllocatedType(),A,Name.c_str());
+  }
+   
 }
 
 /******************** Binary Expression Tree **********************/
@@ -275,7 +307,7 @@ Value* IfExprAST::codegen(driver& drv) {
 };
 
 /********************** Block Expression Tree *********************/
-BlockExprAST::BlockExprAST(std::vector<VarBindingAST*> Def, std::vector<ExprAST*> Val): 
+BlockExprAST::BlockExprAST(std::vector<InitAST*> Def, std::vector<StatementAST*> Val): 
          Def(std::move(Def)), Val(std::move(Val)) {};
 
 Value* BlockExprAST::codegen(driver& drv) {
@@ -306,7 +338,7 @@ Value* BlockExprAST::codegen(driver& drv) {
    for (int i=0, e=Def.size(); i<e; i++) {
       // Per ogni definizione di variabile si genera il corrispondente codice che
       // (in questo caso) non restituisce un registro SSA ma l'istruzione di allocazione
-      AllocaInst *boundval = Def[i]->codegen(drv);
+      AllocaInst *boundval = (AllocaInst*)Def[i]->codegen(drv);
       if (!boundval) 
          return nullptr;
       // Viene temporaneamente rimossa la precedente istruzione di allocazione
@@ -333,35 +365,51 @@ Value* BlockExprAST::codegen(driver& drv) {
    return blockvalue;
 };
 
+
+
+/*INIT*/
+std::string& InitAST::getName() {return Name;};
+initType InitAST::getType() {return INIT;};
+
+
 /************************* Var binding Tree *************************/
-VarBindingAST::VarBindingAST(const std::string Name, ExprAST* Val):
-   Name(Name), Val(Val) {};
+VarBindingAST::VarBindingAST(const std::string Name, ExprAST* Val): Name(Name), Val(Val),IsArray(false) {};
    
-const std::string& VarBindingAST::getName() const { 
-   return Name; 
-};
+VarBindingAST::VarBindingAST(const std::string Name,double Size,std::vector<ExprAST*> Values): Name(Name), Size(Size), Values(std::move(Values)), IsArray(true) {};
+
+std::string& VarBindingAST::getName() { return Name; };
+initType VarBindingAST::getType() {return BINDING;};
+
 
 AllocaInst* VarBindingAST::codegen(driver& drv) {
-   // Viene subito recuperato il riferimento alla funzione in cui si trova
-   // il blocco corrente. Il riferimento è necessario perché lo spazio necessario
-   // per memorizzare una variabile (ovunque essa sia definita, si tratti cioè
-   // di un parametro oppure di una variabile locale ad un blocco espressione)
-   // viene sempre riservato nell'entry block della funzione. Ricordiamo che
-   // l'allocazione viene fatta tramite l'utility CreateEntryBlockAlloca
-   Function *fun = builder->GetInsertBlock()->getParent();
-   // Ora viene generato il codice che definisce il valore della variabile
-   Value *BoundVal = Val->codegen(drv);
-   if (!BoundVal)  // Qualcosa è andato storto nella generazione del codice?
-      return nullptr;
-   // Se tutto ok, si genera l'struzione che alloca memoria per la varibile ...
-   AllocaInst *Alloca = CreateEntryBlockAlloca(fun, Name);
-   // ... e si genera l'istruzione per memorizzarvi il valore dell'espressione,
-   // ovvero il contenuto del registro BoundVal
-   builder->CreateStore(BoundVal, Alloca);
+
+  Function *fun = builder->GetInsertBlock()->getParent();
+  AllocaInst *Alloca = nullptr;
+  if(IsArray) {
+      ArrayType *AT = ArrayType::get(Type::getDoubleTy(*context),Size);
+      AllocaInst* Alloca = CreateEntryBlockAlloca(fun,Name,AT);
+      Value* actVal;
+      for(int i=0; i<Size;i++){
+        Value *ElemVal = (i < Values.size()) ? Values[i]->codegen(drv) : ConstantFP::get(*context, APFloat(0.0));
+        if (!ElemVal)
+            return nullptr;
+        Value *ElemPtr = builder->CreateInBoundsGEP(AT, Alloca, ConstantInt::get(*context, APInt(32, i, true)), Name + "_idx_" + std::to_string(i));
+        builder->CreateStore(ElemVal, ElemPtr);
+      }
+  }
+  else {
+      Value *BoundVal = Val->codegen(drv);
+      if (!BoundVal) 
+        return nullptr;
+
+      Alloca = CreateEntryBlockAlloca(fun, Name);
+    
+      builder->CreateStore(BoundVal, Alloca);
+  }
    
-   // L'istruzione di allocazione (che include il registro "puntatore" all'area di memoria
-   // allocata) viene restituita per essere inserita nella symbol table
-   return Alloca;
+
+   
+return Alloca;
 };
 
 /************************* Prototype Tree *************************/
@@ -491,11 +539,21 @@ Function *FunctionAST::codegen(driver& drv) {
 /*****************************+*********+*/
 
 
-GlobalAST::GlobalAST(std::string Name): Name(Name) {};
+GlobalAST::GlobalAST(std::string Name,bool IsArray, double Size): Name(Name), IsArray(IsArray), Size(Size) {};
 
 Value* GlobalAST::codegen(driver &drv) {
 
-  GlobalVariable *gVar = new GlobalVariable(*module, Type::getDoubleTy(*context), false, GlobalValue::CommonLinkage, ConstantFP::get(*context, APFloat(0.0)) , Name);
+  GlobalVariable *gVar;
+  if(!IsArray) {
+    gVar = new GlobalVariable(*module, Type::getDoubleTy(*context), false, GlobalValue::CommonLinkage, ConstantFP::get(*context, APFloat(0.0)) , Name);
+  }
+  else if(IsArray && (Size > 0)) {
+    ArrayType* AT = ArrayType::get(Type::getDoubleTy(*context),Size);
+    gVar = new GlobalVariable(*module, AT, false, GlobalValue::CommonLinkage,ConstantFP::getNullValue(AT), Name);
+  }
+  else {
+    return LogErrorV("Tentativo di inizializzare array con dimensione < 0.");
+  }
 
   gVar->print(errs());
   fprintf(stderr, "\n");
@@ -503,38 +561,75 @@ Value* GlobalAST::codegen(driver &drv) {
 };
 
 
-AssignmentExprAST::AssignmentExprAST(std::string Name, ExprAST* Val): Name(Name), Val(Val) {};
-
+AssignmentExprAST::AssignmentExprAST(std::string Name, ExprAST* Val, ExprAST* Index, bool IsArray): Name(Name), Val(Val), Index(Index), IsArray(IsArray) {};
+std::string& AssignmentExprAST::getName(){ return Name; };
+initType AssignmentExprAST::getType() {return ASSIGNMENT;};
 Value* AssignmentExprAST::codegen(driver& drv) {
 
   Value* V = Val->codegen(drv);
-
-  if(!V) {return nullptr;}
+  if(!V) { return LogErrorV("Valore non adatto all'assegnamento.");}
 
   AllocaInst* A = drv.NamedValues[Name];
 
   if(!A) {
-
+    //Se A non è non è in NamedValues provo a cercarla nelle variabili globali.
     GlobalVariable* G = module->getNamedGlobal(Name);
 
-    if(!G) { return LogErrorV("Variabile "+Name+" not definita"); }
-    else { builder->CreateStore(V,G); return G; }
+    //Se non c'è nemmeno nei globali lancio errore.
+    if(!G) {  return LogErrorV("Variabile non dichiarata: " + Name); }
+
+    if(IsArray) {
+      Value *VIndex = Index->codegen(drv);
+
+      if(!VIndex) {return nullptr;}
+
+      Value *FPIndex = builder->CreateFPTrunc(VIndex, Type::getFloatTy(*context));
+      Value *INTIndex = builder->CreateFPToSI(FPIndex, Type::getInt32Ty(*context));
+
+      Value *GEP = builder->CreateInBoundsGEP(G->getValueType(),G, INTIndex);
+
+      builder->CreateStore(V,GEP);
+    }
+    else { 
+      builder->CreateStore(V,G);
+    }
+    return V;
+  }
+  //Se la variabile è locale
+  else {
+    //Se è un array
+    if(IsArray) {
+        Value *VIndex = Index->codegen(drv);
+
+        if(!VIndex) {return nullptr;}
+
+        Value *FPIndex = builder->CreateFPTrunc(VIndex, Type::getFloatTy(*context));
+        Value *INTIndex = builder->CreateFPToSI(FPIndex, Type::getInt32Ty(*context));
+
+        Value *GEP = builder->CreateInBoundsGEP(A->getAllocatedType(),A, INTIndex);
+
+        builder->CreateStore(V,GEP);
+    }
+    else { 
+      //Prende il valore della variabile Name da NamedValues
+      builder->CreateStore(V,A);
+    }
+    return V;
 
   }
-  else { builder->CreateStore(V,A); return A; }
 }
 
-ForExprAST::ForExprAST(RootAST* Init, ExprAST* CondExp, AssignmentExprAST* Assignment, ExprAST* Statement): Init(Init), CondExp(CondExp), Assignment(Assignment), Statement(Statement) {};
+ForStmtAST::ForStmtAST(InitAST* Init, ExprAST* CondExp, AssignmentExprAST* Assignment, StatementAST* Statement): Init(Init), CondExp(CondExp), Assignment(Assignment), Statement(Statement) {};
 
-Value* ForExprAST::codegen(driver& drv) {
+Value* ForStmtAST::codegen(driver& drv) {
 
 
   //Genera i BB nella funzione attuale, inserisco subito quello responsabile per l'inizalizzazione;
   Function *function = builder->GetInsertBlock()->getParent();
   BasicBlock *EntryBB =  BasicBlock::Create(*context, "for_entry",function);
-  BasicBlock *CondBB = BasicBlock::Create(*context,"for_condition");
-  BasicBlock *LoopBB = BasicBlock::Create(*context, "for_body");
-  BasicBlock *ExitBB = BasicBlock::Create(*context, "for_exit");
+  BasicBlock *CondBB = BasicBlock::Create(*context,"for_condition",function);
+  BasicBlock *LoopBB = BasicBlock::Create(*context, "for_body",function);
+  BasicBlock *ExitBB = BasicBlock::Create(*context, "for_exit",function);
 
 
 
@@ -544,29 +639,17 @@ Value* ForExprAST::codegen(driver& drv) {
 
   //Gestione delle variabili in Init
   AllocaInst* AllocaTmp = nullptr;
+  Value* IVal = Init->codegen(drv);
+  if(!IVal) {return nullptr;}
 
-  auto* Node = dynamic_cast<VarBindingAST*>(Init);
-  if(Node) {
+  if(Init->getType() == BINDING) {
 
-      AllocaInst* Val = Node->codegen(drv);
-
-      if(!Val) return nullptr;
-
-      AllocaTmp = drv.NamedValues[Node->getName()];
-      drv.NamedValues[Node->getName()] = Val;
-  }
-  else {
-    auto* Node = dynamic_cast<AssignmentExprAST*>(Init);
-    if(!Node) return nullptr;
-
-    Value* Val = Node->codegen(drv);
-    if(!Val) return nullptr;
+      AllocaTmp = drv.NamedValues[Init->getName()];
+      drv.NamedValues[Init->getName()] = (AllocaInst*) IVal;
   }
   
 
   //Branch incondizionato tra Entry e Condition, cambio InsertPoint del builder.
-  EntryBB = builder->GetInsertBlock();
-  function->insert(function->end(),CondBB);
   builder->CreateBr(CondBB);
   builder->SetInsertPoint(CondBB);
 
@@ -577,10 +660,7 @@ Value* ForExprAST::codegen(driver& drv) {
 
 
   //Inserisco LoopBB e cambio InsertPoint
-  CondBB = builder->GetInsertBlock();
-  function->insert(function->end(),LoopBB);
   builder->SetInsertPoint(LoopBB);
-
 
   //Genera il body
   Value* loopBody = Statement->codegen(drv);
@@ -593,17 +673,111 @@ Value* ForExprAST::codegen(driver& drv) {
   builder->CreateBr(CondBB);
 
   //Inserimento di ExitBB e cambio InsertPoint
-  LoopBB = builder->GetInsertBlock();
-  function->insert(function->end(),ExitBB);
+
   builder->SetInsertPoint(ExitBB);
 
+  //FOR restituisce 0.0 come da tutorial di LLVM
+  PHINode *P = builder->CreatePHI(Type::getDoubleTy(*context),1,"for_phi");
+  P->addIncoming(ConstantFP::getNullValue(Type::getDoubleTy(*context)),CondBB);
 
   //Restore della variabile in Init
-  if(AllocaTmp) drv.NamedValues[Node->getName()] = AllocaTmp;
+  if(Init->getType() == BINDING) {
+    drv.NamedValues[Init->getName()] = AllocaTmp;
+  }
 
-  //FOR restituisce 0.0 come da tutorial di LLVM
-  return Constant::getNullValue(Type::getDoubleTy(*context));
-}
+  
+  return P;
+};
+
+
+IfStmtAST::IfStmtAST(ExprAST* Cond, StatementAST* TrueExp, StatementAST* FalseExp):
+   Cond(Cond), TrueExp(TrueExp), FalseExp(FalseExp) {};
+   
+Value* IfStmtAST::codegen(driver& drv) {
+    // Viene dapprima generato il codice per valutare la condizione, che
+    // memorizza il risultato (di tipo i1, dunque booleano) nel registro SSA 
+    // che viene "memorizzato" in CondV. 
+    Value* CondV = Cond->codegen(drv);
+    if (!CondV)
+       return nullptr;
+    
+    // Ora bisogna generare l'istruzione di salto condizionato, ma prima
+    // vanno creati i corrispondenti basic block nella funzione attuale
+    // (ovvero la funzione di cui fa parte il corrente blocco di inserimento)
+    Function *function = builder->GetInsertBlock()->getParent();
+    BasicBlock *TrueBB =  BasicBlock::Create(*context, "trueexp", function);
+    // Il blocco TrueBB viene inserito nella funzione dopo il blocco corrente
+    BasicBlock *FalseBB = BasicBlock::Create(*context, "falseexp");
+    BasicBlock *MergeBB = BasicBlock::Create(*context, "endcond");
+    // Gli altri due blocchi non vengono ancora inseriti perché le istruzioni
+    // previste nel "ramo" true del condizionale potrebbe dare luogo alla creazione
+    // di altri blocchi, che naturalmente andrebbero inseriti prima di FalseBB
+    
+    // Ora possiamo crere l'istruzione di salto condizionato
+    builder->CreateCondBr(CondV, TrueBB, FalseBB);
+    
+    // "Posizioniamo" il builder all'inizio del blocco true, 
+    // generiamo ricorsivamente il codice da eseguire in caso di
+    // condizione vera e, in chiusura di blocco, generiamo il saldo 
+    // incondizionato al blocco merge
+    builder->SetInsertPoint(TrueBB);
+    Value *TrueV = TrueExp->codegen(drv);
+    if (!TrueV)
+       return nullptr;
+    builder->CreateBr(MergeBB);
+    
+    // Come già ricordato, la chiamata di codegen in TrueExp potrebbe aver inserito 
+    // altri blocchi (nel caso in cui la parte trueexp sia a sua volta un condizionale).
+    // Ne consegue che il blocco corrente potrebbe non coincidere più con TrueBB.
+    // Il branch alla parte merge deve però essere effettuato dal blocco corrente,
+    // che dunque va recuperato. Ed è fondamentale sapere da quale blocco origina
+    // il salto perché tale informazione verrà utilizzata da un'istruzione PHI.
+    // Nel caso in cui non sia stato inserito alcun nuovo blocco, la seguente
+    // istruzione corrisponde ad una NO-OP
+    TrueBB = builder->GetInsertBlock();
+    function->insert(function->end(), FalseBB);
+    
+    // "Posizioniamo" il builder all'inizio del blocco false, 
+    // generiamo ricorsivamente il codice da eseguire in caso di
+    // condizione falsa e, in chiusura di blocco, generiamo il saldo 
+    // incondizionato al blocco merge
+    builder->SetInsertPoint(FalseBB);
+    
+    
+    if (FalseExp){
+      Value *FalseV = FalseExp->codegen(drv);
+      if(!FalseV) {
+        return nullptr;
+      }
+      FalseBB = builder->GetInsertBlock();
+    }
+       
+    builder->CreateBr(MergeBB);
+    
+    // Esattamente per la ragione spiegata sopra (ovvero il possibile inserimento
+    // di nuovi blocchi da parte della chiamata di codegen in FalseExp), andiamo ora
+    // a recuperare il blocco corrente 
+    FalseBB = builder->GetInsertBlock();
+    function->insert(function->end(), MergeBB);
+    
+    // Andiamo dunque a generare il codice per la parte dove i due "flussi"
+    // di esecuzione si riuniscono. Impostiamo correttamente il builder
+    builder->SetInsertPoint(MergeBB);
+  
+    // Il codice di riunione dei flussi è una "semplice" istruzione PHI: 
+    //a seconda del blocco da cui arriva il flusso, TrueBB o FalseBB, il valore
+    // del costrutto condizionale (si ricordi che si tratta di un "expression if")
+    // deve essere copiato (in un nuovo registro SSA) da TrueV o da FalseV
+    // La creazione di un'istruzione PHI avviene però in due passi, in quanto
+    // il numero di "flussi entranti" non è fissato.
+    // 1) Dapprima si crea il nodo PHI specificando quanti sono i possibili nodi sorgente
+    // 2) Per ogni possibile nodo sorgente, viene poi inserita l'etichetta e il registro
+    //    SSA da cui prelevare il valore 
+    PHINode *PN = builder->CreatePHI(Type::getDoubleTy(*context), 2, "condval");
+    PN->addIncoming(ConstantFP::getNullValue(Type::getDoubleTy(*context)), TrueBB);
+    PN->addIncoming(ConstantFP::getNullValue(Type::getDoubleTy(*context)), FalseBB);
+    return PN;
+};
 
 
 BooleanExprAST::BooleanExprAST(char Op, ExprAST* LHS, ExprAST* RHS): Op(Op), LHS(LHS), RHS(RHS) {};
@@ -611,8 +785,8 @@ BooleanExprAST::BooleanExprAST(char Op, ExprAST* LHS, ExprAST* RHS): Op(Op), LHS
 Value* BooleanExprAST::codegen(driver& drv) {
   Value *L = LHS->codegen(drv);
   Value *R = RHS ? RHS->codegen(drv) : nullptr;
-  if(!L) return nullptr;
 
+  if(!L) return nullptr;
 
   switch(Op){
     case 'A':
@@ -625,5 +799,4 @@ Value* BooleanExprAST::codegen(driver& drv) {
       std::cout << Op << std::endl;
       return LogErrorV("Operatore booleano non supportato");
   }
-    
 };

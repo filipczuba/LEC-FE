@@ -23,6 +23,13 @@
 
 using namespace llvm;
 
+enum initType {
+  ASSIGNMENT,
+  BINDING,
+  INIT
+};
+
+
 // Dichiarazione del prototipo yylex per Flex
 // Flex va proprio a cercare YY_DECL perché
 // deve espanderla (usando M4) nel punto appropriato
@@ -63,6 +70,8 @@ public:
   virtual Value *codegen(driver& drv) { return nullptr; };
 };
 
+
+
 // Classe che rappresenta la sequenza di statement
 class SeqAST : public RootAST {
 private:
@@ -74,8 +83,20 @@ public:
   Value *codegen(driver& drv) override;
 };
 
+class StatementAST : public RootAST {
+};
+
+class InitAST : public StatementAST{
+  private:
+    std::string Name;
+  public:
+    virtual std::string& getName();
+    virtual initType getType();
+
+};
+
 /// ExprAST - Classe base per tutti i nodi espressione
-class ExprAST : public RootAST {};
+class ExprAST : public StatementAST {};
 
 /// NumberExprAST - Classe per la rappresentazione di costanti numeriche
 class NumberExprAST : public ExprAST {
@@ -92,9 +113,11 @@ public:
 class VariableExprAST : public ExprAST {
 private:
   std::string Name;
+  ExprAST* Index;
+  bool IsArray;
   
 public:
-  VariableExprAST(const std::string &Name);
+  VariableExprAST(const std::string &Name, ExprAST* Index = nullptr, bool IsArray = false);
   lexval getLexVal() const override;
   Value *codegen(driver& drv) override;
 };
@@ -130,29 +153,34 @@ private:
   ExprAST* TrueExp;
   ExprAST* FalseExp;
 public:
-  IfExprAST(ExprAST* Cond, ExprAST* TrueExp, ExprAST* FalseExp=nullptr);
+  IfExprAST(ExprAST* Cond, ExprAST* TrueExp, ExprAST* FalseExp);
   Value *codegen(driver& drv) override;
 };
 
 /// BlockExprAST
 class BlockExprAST : public ExprAST {
 private:
-  std::vector<VarBindingAST*> Def;
-  std::vector<ExprAST*> Val;
+  std::vector<InitAST*> Def;
+  std::vector<StatementAST*> Val;
 public:
-  BlockExprAST(std::vector<VarBindingAST*> Def, std::vector<ExprAST*> Val);
+  BlockExprAST(std::vector<InitAST*> Def, std::vector<StatementAST*> Val);
   Value *codegen(driver& drv) override;
 }; 
 
 /// VarBindingAST
-class VarBindingAST: public RootAST {
+class VarBindingAST: public InitAST {
 private:
-  const std::string Name;
+  std::string Name;
   ExprAST* Val;
+  std::vector<ExprAST*> Values;
+  bool IsArray;
+  double Size;
 public:
   VarBindingAST(const std::string Name, ExprAST* Val);
+  VarBindingAST(const std::string Name,double Size,std::vector<ExprAST*> Values = std::vector<ExprAST*>());
   AllocaInst *codegen(driver& drv) override;
-  const std::string& getName() const;
+  initType getType() override;
+  std::string& getName() override;
 };
 
 /// PrototypeAST - Classe per la rappresentazione dei prototipi di funzione
@@ -190,35 +218,49 @@ public:
 class GlobalAST : public RootAST {
 private:
   const std::string Name;
+  bool IsArray;
+  double Size;
 
 public:
-  GlobalAST(std::string Name);
+  GlobalAST(std::string Name,bool IsArray = false, double Size = 0);
   Value *codegen(driver& drv) override;
 };
 
 
-
-
-class AssignmentExprAST : public ExprAST {
+class AssignmentExprAST : public InitAST {
 private:
   std::string Name;
   ExprAST* Val;
+  ExprAST* Index;
+  bool IsArray;
 
 public:
-  AssignmentExprAST(std::string Name, ExprAST* Val);
+  AssignmentExprAST(std::string Name, ExprAST* Val, ExprAST* Index = nullptr, bool IsArray = false);
   Value *codegen(driver& dvr) override;
+  initType getType() override;
+  std::string& getName() override;
 };
 
 
-class ForExprAST : public ExprAST {
+class IfStmtAST : public StatementAST {
+private:
+  ExprAST* Cond;
+  StatementAST* TrueExp;
+  StatementAST* FalseExp;
+public:
+  IfStmtAST(ExprAST* Cond, StatementAST* TrueExp, StatementAST* FalseExp=nullptr);
+  Value *codegen(driver& drv) override;
+};
+
+class ForStmtAST : public StatementAST {
   private:
-    RootAST* Init;
+    InitAST* Init;
     ExprAST* CondExp;
     AssignmentExprAST* Assignment;
-    ExprAST* Statement;
+    StatementAST* Statement;
 
   public:
-    ForExprAST(RootAST* Init, ExprAST* CondExp, AssignmentExprAST* Assignment, ExprAST* Statement);
+    ForStmtAST(InitAST* Init, ExprAST* CondExp, AssignmentExprAST* Assignment, StatementAST* Statement);
     Value *codegen(driver& drv) override;
 
 };
