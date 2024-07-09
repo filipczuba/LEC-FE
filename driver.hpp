@@ -23,7 +23,7 @@
 
 using namespace llvm;
 
-enum initType {
+enum IT {
   ASSIGNMENT,
   BINDING,
   INIT
@@ -91,7 +91,7 @@ class InitAST : public StatementAST{
     std::string Name;
   public:
     virtual std::string& getName();
-    virtual initType getType();
+    virtual IT getType();
 
 };
 
@@ -179,7 +179,7 @@ public:
   VarBindingAST(const std::string Name, ExprAST* Val);
   VarBindingAST(const std::string Name,double Size,std::vector<ExprAST*> Values = std::vector<ExprAST*>());
   AllocaInst *codegen(driver& drv) override;
-  initType getType() override;
+  IT getType() override;
   std::string& getName() override;
 };
 
@@ -237,7 +237,7 @@ private:
 public:
   AssignmentExprAST(std::string Name, ExprAST* Val, ExprAST* Index = nullptr, bool IsArray = false);
   Value *codegen(driver& dvr) override;
-  initType getType() override;
+  IT getType() override;
   std::string& getName() override;
 };
 

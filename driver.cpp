@@ -369,7 +369,7 @@ Value* BlockExprAST::codegen(driver& drv) {
 
 /*INIT*/
 std::string& InitAST::getName() {return Name;};
-initType InitAST::getType() {return INIT;};
+IT InitAST::getType() {return INIT;};
 
 
 /************************* Var binding Tree *************************/
@@ -378,7 +378,7 @@ VarBindingAST::VarBindingAST(const std::string Name, ExprAST* Val): Name(Name), 
 VarBindingAST::VarBindingAST(const std::string Name,double Size,std::vector<ExprAST*> Values): Name(Name), Size(Size), Values(std::move(Values)), IsArray(true) {};
 
 std::string& VarBindingAST::getName() { return Name; };
-initType VarBindingAST::getType() {return BINDING;};
+IT VarBindingAST::getType() {return BINDING;};
 
 
 AllocaInst* VarBindingAST::codegen(driver& drv) {
@@ -562,8 +562,11 @@ Value* GlobalAST::codegen(driver &drv) {
 
 
 AssignmentExprAST::AssignmentExprAST(std::string Name, ExprAST* Val, ExprAST* Index, bool IsArray): Name(Name), Val(Val), Index(Index), IsArray(IsArray) {};
+
 std::string& AssignmentExprAST::getName(){ return Name; };
-initType AssignmentExprAST::getType() {return ASSIGNMENT;};
+
+IT AssignmentExprAST::getType() {return ASSIGNMENT;};
+
 Value* AssignmentExprAST::codegen(driver& drv) {
 
   Value* V = Val->codegen(drv);
