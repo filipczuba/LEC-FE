@@ -9,7 +9,6 @@ This repository contains an implementation of the Kaleidoscope language, a simpl
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
 - [Usage](#usage)
-- [Examples](#examples)
 - [License](#license)
 
 ## Features
